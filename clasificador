@@ -1,0 +1,187 @@
+//debera ser cargada a google earth engine una capa vectorial que contenga, en este caso regiones fisiograficas. ademas otra 
+//capa que contenga los centros urbanos del pais. y tambien otra capa vectorial de invernaderos  (preferiblemente una capa 
+//por region fisiografica)
+//it must be previusly uploaded to google eart engine a vector layer, that contains, in this case phisiographis provinces. also 
+//we upload another layer with the urban centers of the country. also a vector layer with the greenhouses (preferably, one layer
+//per phisiographic province)
+
+var fisio = ee.FeatureCollection('users/XXX/fisiografica')
+     .filter(ee.Filter.or(ee.Filter.eq('id', 'l')));
+var urban = ee.FeatureCollection('users/XXX/MEX_URBAN')
+var invernaderos = ee.FeatureCollection('users/XXX/invernaderos')
+     
+//debera ser cargada a google earth engine la coleccion de imagenes nocturnas en el periodo de tiempo deseado, asi como
+//una capa de un modelo de elevacion digital (DEM)
+//it must be previusly uploaded to google eart engine the nigthime light image collection filtered by the desired dates,
+//we also upload a layer with a digital elevation model (DEM)
+
+var luz = ee.ImageCollection('NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG')
+    .filterDate('2017-05-01', '2018-05-01')
+    .filterBounds(fisio)
+var dem = ee.Image("USGS/SRTMGL1_003")
+
+//creamos una funcion para enmascarar las nubes, a partir de la informacion de la banda de nubes de las imegens sentinel-2
+//we create a function to mask clouds, using the information in the cloud band of the sentinel 2 images 
+
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+  var cloudBitMask = ee.Number(2).pow(10).int();
+  var cirrusBitMask = ee.Number(2).pow(11).int();
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0).and(
+            qa.bitwiseAnd(cirrusBitMask).eq(0));
+  return image.updateMask(mask);
+}
+
+//creamos una funcion para calcular diferentes indices, a partir de la informacion de las bandas espectrales de las imegens sentinel-2
+//we create a function to calculate some indexes, based on the information in the spectral bands of the sentinel 2 images 
+
+function indice(image){
+var sw2_nir = image.normalizedDifference(['B12', 'B8']).rename('SW2_NIR');
+var PL = image.normalizedDifference(['B11', 'B4']);
+var PLU = PL.where(PL.lte(-0.2),1).where(PL.gt(0.13),1).rename('PLU');
+ return image.addBands(sw2_nir).addBands(PLU);
+}
+
+//llamamos a la coleccion de imagenes sentinel-2, filtradas por las fechas deseadas, la region fisiografica y el porcentaje de pixeles 
+//con nubes (metadato de la imagen), y ademas ejecutamos a todas esas imagenes la mascara de nubes y el calculo de indices
+//we call the sentinel-2 image collection, and filter them by: dates, phisiographic region, cloud pixel percentage. And to those images
+//we perform the cloud mask, and the indexes calcultaion
+
+var collection = ee.ImageCollection('COPERNICUS/S2')
+    .filterDate('2017-10-23', '2018-10-22')
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 5))
+    .filterBounds(fisio)
+    .map(maskS2clouds)
+    .map(indice);
+    
+//creamos una imagen hiperespectral compuesta a partir de la mediana de toda la coleccion
+//we create a composite image, using the median of the collection 
+    
+var im2 = collection.median();
+
+//establecemos los parametros de visualizacion (puede omitirse)
+//we establish the vizualisation parameters (can be omitted)
+
+var vizParams = {bands: ['B4', 'B3', 'B2'],
+  min: 600,
+  max: 2000,
+  gamma: 0.5,
+};
+
+//añadimos a la visualizacion la imagen compuesta (puede omitirse)
+//we add to the visor the composite image (can be omitted)
+
+Map.addLayer(im2, vizParams, 'compuesto')
+var empty = ee.Image().byte()
+var outline = empty.paint({
+  featureCollection: fisio,
+  color: 1,
+  width: 2
+});
+
+//sobre la imagen compuesta creamos un indice de agua || sobre la imagenes nocturnas creamos una imagen de luz nocturna || y sobre el
+//DEM creamos una capa de inclinacion de terreno
+//using the composite image we calculte a water index || usin the nightime ligth, we create a composite of nocturla light || using the 
+//DEm we create a layer of terrain slope
+
+var ndwi = im2.normalizedDifference(['B3', 'B8']);
+var noche = luz.select('avg_rad').sum();
+var slope1= ee.Terrain.slope(dem);
+
+//con estas 3 neuvas capas, creamos 3 mascaras: 1 para quitar cuerpos de agua, 2 para quitar centro urbanos iluminados, 3 para quitar
+//terrenos con inclinacion mayor a 8°
+//with the last 3 new layers, we create 3 mask: 1 to remove water bodies,2 to remove iluminated urban areas, 3 to remove terrain with 
+//slope greater than 8°
+
+var bare = (ndwi.lt(0));
+var ma2 = noche.lt(59);
+var ma3 = slope1.lt(8);
+
+//usando uno de los indices calculados (para detectar plasticos), en la imagen compuesta creamoc una mascara adicional
+//using one of the calculated index (for detecting plastics), in the composite image. we create an additional mask 
+
+var ma4 = im2.select('PLU').lt(1);
+
+//unimos todas nuestras mascaras, y ademas hacemos un clip usando la capa vectorial de areas urbanas, previamente cargada.
+//y actualizamos nuestra imagen compuesta
+//we fuse all the masks, and make a clip with the vector layer of urban areas, previously uploaded. And update the composite
+//image
+
+var ma5 = bare.multiply(ma3).multiply(ma4).multiply(ma2);
+var im3 = im2.clip(urban);
+var im4 = im3.updateMask(ma5);
+
+//seleccionamos las bandas que nos interesan para usar en el clasificador
+//we select the bands that we will use in the classifier
+
+var bands = [ 'B2', 'B8', 'B11', 'B12', 'SW2_NIR'];
+
+//creamos los puntos de entrenamiento (agriculutra protegida = 1 dentro de los poligonos de la capa de iveraderos;
+//non protected agriculture = 0 dentro de la region fisiografica correspondiente) 
+//we create the trainig points (in both classes: protected agriculture = 1 inside the polygons of the greenhouse layer;
+//non protected agriculture = 0, inside the phisiogrhaphic province)
+
+var clase_noinv = function(feature) {
+ return feature.set({covertura: feature.geometry().area().add(0)});
+ };
+var clase_inv = function(feature) {
+  return feature.set({covertura: feature.geometry().area().add(1)});
+ };
+var no_inv = ee.FeatureCollection.randomPoints(fisio, 5000);
+var otros = no_inv.map(clase_noinv);
+var pu_inv = ee.FeatureCollection.randomPoints(invernaderos, 1000);
+var plasticos = pu_inv.map(clase_inv);
+var newfc = plasticos.merge(otros);
+
+//ya con todos los puntos creados, extraemos la informacion espectral (de las bandas de interes) de todos ellos
+//we extract the spectral information (of each band of interest) from every training ponint
+
+var training = im2.select(bands).sampleRegions({
+   collection: newfc,
+   properties: ['covertura'],
+   scale: 10});
+
+// con la infoncaion extraida, entrenamos el clasfificador
+//we train the classifier with the extracted information
+
+var classifieri = ee.Classifier.gmoMaxEnt().setOutputMode('PROBABILITY').train({
+   features: training,
+   classProperty: 'covertura',
+   inputProperties: bands
+});
+
+//ejecutamos la clasificacion (dando un mapa de probabilidades)
+//run the classification (resulting in a probability map)
+
+var classified = im4.select(bands).classify(classifieri);
+
+//creamos un umbral para determinar que es y no es aicultura protegida
+//we create a threshold to determinate which pixel are or not protected agriculture
+
+var umbral = classified.where(classified.gte(0.8), 1).where(classified.lt(0.8), 0);
+
+//para exportar los resultados (al google drive)
+//to export the results (to google drive)
+
+Export.image.toDrive({
+     //la imagen a exportar
+     image: umbral,
+     region: fisio.geometry().bounds(), 
+     folder: 'agricultura',
+     // una descripcion 
+     description: 'region_sierra_sur',
+     //colocar el mayor numero de pixeles, para evitar que el servidor marque error
+     maxPixels:10000000000000,
+     //que cada imagen tenga su nombre correspondiente
+     fileNamePrefix: 'sierra_sur',
+     //la escala de la imagen
+     scale: 10
+});
+  
+//una ve exportado, se deberia repetir el codigo para cada una de las regiones fisiograficas, se recomienda dividir el pais en regiones
+//para facilitar el procesamiento, ademas se logran mejores resultados para cada region (pues tienen coberturas diferentes)
+//los datos exprotados son raster, que seberan ser vectorizados
+//se puede dividir el pais de distintas formas, depronto dividido por estados arroje aun mejores resultados
+//once exported, ypu must repeat the process for each region, is recommended to divide the country in regions, to facilitate the
+//process, also it have better results for each region (because each one has differente covers), the exported data are raster, that 
+//must be vectorized later.
