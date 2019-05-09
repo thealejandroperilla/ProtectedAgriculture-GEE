@@ -1,9 +1,12 @@
 //debera ser cargada a google earth engine una capa vectorial que contenga, en este caso regiones fisiograficas. ademas otra 
 //capa que contenga los centros urbanos del pais. y tambien otra capa vectorial de invernaderos  (preferiblemente una capa 
-//por region fisiografica)
+//por region fisiografica, el shapefilde de inevrnaderos se puede obtener en un link en el documento READ ME)
+//leer tambien el ultimo parrafo de este codigo
 //it must be previusly uploaded to google eart engine a vector layer, that contains, in this case phisiographis provinces. also 
 //we upload another layer with the urban centers of the country. also a vector layer with the greenhouses (preferably, one layer
-//per phisiographic province)
+//per phisiographic province, it can be found on a link in the READ Me file)
+//also read the last paragraph of this code
+
 
 var fisio = ee.FeatureCollection('users/XXX/fisiografica')
      .filter(ee.Filter.or(ee.Filter.eq('id', 'l')));
